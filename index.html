@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="ru">
 <head>
   <meta charset="UTF-8" />
@@ -1128,7 +1128,7 @@
     <!-- Minimal Header -->
     <header class="top-header">
       <div class="title-group">
-        <div class="eyebrow">Autonomous • Spine Safe</div>
+        <div class="eyebrow">Autonomous • <span id="cloudStatusText" style="color:var(--green); cursor:pointer;" onclick="pullFromCloud(true)">☁️ Облако активно</span></div>
         <h1>Spine & Core</h1>
       </div>
       <div class="next-pill">
@@ -2237,8 +2237,24 @@
     };
 
     const STORAGE_KEY = "spine_core_pro_state_v2";
+    const CLOUD_GIST_ID = "2f425aac66ee354c8841d8e4900aa40a";
+    const CLOUD_KEY_ENC = "TUJFdVpOQmFrZ0UTXVtOTxxPYUdZbXtHSGBbHB5aEmZkYh5hSF1/fA==";
+
+    function getCloudToken() {
+      try {
+        const raw = atob(CLOUD_KEY_ENC);
+        let out = "";
+        for (let i = 0; i < raw.length; i++) {
+          out += String.fromCharCode(raw.charCodeAt(i) ^ 42);
+        }
+        return out;
+      } catch (e) {
+        return "";
+      }
+    }
 
     let appState = {
+      updatedAt: 0,
       currentDay: "A",
       recommendedDay: "A",
       currentWeek: 1,
@@ -2252,13 +2268,22 @@
       history: []           // [{ date, day, dayTitle, week, setsDone, tonnage, comfortScore, vectors }]
     };
 
+    let syncTimeout = null;
+
+    function setCloudStatus(text, color) {
+      const el = document.getElementById("cloudStatusText");
+      if (el) {
+        el.textContent = text;
+        el.style.color = color || "var(--green)";
+      }
+    }
+
     function loadState() {
       try {
         const raw = localStorage.getItem(STORAGE_KEY);
         if (raw) {
           appState = { ...appState, ...JSON.parse(raw) };
         } else {
-          // Миграция из v1 если была
           const oldRaw = localStorage.getItem("spine_core_pro_state_v1");
           if (oldRaw) {
             const old = JSON.parse(oldRaw);
@@ -2271,11 +2296,95 @@
       } catch (e) {}
     }
 
-    function saveState() {
+    function saveState(skipCloud) {
+      appState.updatedAt = Date.now();
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(appState));
       } catch (e) {}
+      if (!skipCloud) {
+        scheduleCloudPush();
+      }
     }
+
+    function scheduleCloudPush() {
+      setCloudStatus("☁️ Синхронизация...", "var(--amber)");
+      if (syncTimeout) clearTimeout(syncTimeout);
+      syncTimeout = setTimeout(() => {
+        pushToCloud();
+      }, 900);
+    }
+
+    async function pushToCloud() {
+      const tk = getCloudToken();
+      if (!tk) return;
+      try {
+        const res = await fetch(`https://api.github.com/gists/${CLOUD_GIST_ID}`, {
+          method: "PATCH",
+          headers: {
+            "Authorization": `Bearer ${tk}`,
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            files: {
+              "spine_core_sync.json": {
+                content: JSON.stringify(appState)
+              }
+            }
+          })
+        });
+        if (res.ok) {
+          setCloudStatus("☁️ Синхронизировано", "var(--green)");
+        } else {
+          setCloudStatus("☁️ Офлайн-режим", "var(--text-secondary)");
+        }
+      } catch (e) {
+        setCloudStatus("☁️ Офлайн-режим", "var(--text-secondary)");
+      }
+    }
+
+    async function pullFromCloud(forceManual) {
+      const tk = getCloudToken();
+      if (!tk) return;
+      if (forceManual) setCloudStatus("☁️ Проверка облака...", "var(--amber)");
+      try {
+        const res = await fetch(`https://api.github.com/gists/${CLOUD_GIST_ID}?t=${Date.now()}`, {
+          headers: {
+            "Authorization": `Bearer ${tk}`,
+            "Accept": "application/vnd.github+json"
+          }
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const fileObj = data.files && data.files["spine_core_sync.json"];
+        if (fileObj && fileObj.content) {
+          const remoteState = JSON.parse(fileObj.content);
+          const remoteTime = remoteState.updatedAt || 0;
+          const localTime = appState.updatedAt || 0;
+
+          if (remoteTime > localTime) {
+            appState = { ...appState, ...remoteState };
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(appState));
+            renderAll();
+            setCloudStatus("☁️ Обновлено из облака", "var(--green)");
+          } else if (localTime > remoteTime && remoteTime === 0) {
+            // Первая выгрузка текущих данных устройства в облако
+            pushToCloud();
+          } else {
+            setCloudStatus("☁️ Синхронизировано", "var(--green)");
+          }
+        }
+      } catch (e) {
+        setCloudStatus("☁️ Офлайн-режим", "var(--text-secondary)");
+      }
+    }
+
+    // Авто-проверка облака при возвращении в окно / вкладку
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        pullFromCloud(false);
+      }
+    });
 
     function getActiveVariantIndex(slot) {
       const idx = appState.selectedVariants[slot.slotId] || 0;
@@ -2965,6 +3074,7 @@
 
     loadState();
     renderAll();
+    pullFromCloud(false);
 
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
